@@ -8,7 +8,8 @@
     "dev": "nodemon server.js",
     "clear-clients": "node scripts/clearClients.js",
     "clear-operations": "node scripts/clearOperations.js",
-    "fix-balances": "node scripts/fixNegativeBalances.js"
+    "fix-balances": "node scripts/fixNegativeBalances.js",
+    "verify:funds": "node scripts/verify-funds.cjs"
   },
   "keywords": ["bank", "api", "mongodb"],
   "author": "",
@@ -22,7 +23,7 @@
     "dotenv": "^16.3.1"
   },
   "devDependencies": {
+    "mongodb-memory-server": "^11.3.0",
     "nodemon": "^3.0.2"
   }
 }
-

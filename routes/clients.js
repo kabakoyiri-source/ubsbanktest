@@ -12,7 +12,7 @@ router.use(protect);
 // @access  Private
 router.get('/', async (req, res) => {
   try {
-    const clients = await Client.find({}).sort({ createdAt: -1 });
+    const clients = await Client.find({ userId: req.user.id }).sort({ createdAt: -1 });
     res.json({
       success: true,
       count: clients.length,

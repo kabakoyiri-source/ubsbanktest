@@ -29,6 +29,7 @@ const userSchema = new mongoose.Schema({
     enum: ['admin', 'user'],
     default: 'user'
   },
+  ledgerRevision: { type: Number, default: 0 },
   balances: {
     CHF: { type: Number, default: 0 },
     EUR: { type: Number, default: 0 },
