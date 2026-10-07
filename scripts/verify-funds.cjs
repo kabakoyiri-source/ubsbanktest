@@ -57,6 +57,28 @@ async function main() {
     const clients = await request('/clients', undefined, 'GET');
     assert.equal(clients.data.length, 1);
 
+    // Public beneficiary creation normalizes bank details and ignores protected fields.
+    const recipient = { firstName: ' Test ', lastName: ' Recipient ', bankName: ' Test bank ', accountNumber: 'ch55 0023 5235 8890 1234 5', swiftCode: 'test bank', bankAddress: ' Test address ', userId: user.id, balance: 999999, status: 'suspended' };
+    const created = await request('/clients', recipient, 'POST', other);
+    assert.equal(created.status, 201);
+    assert.equal(created.data.userId, other.id);
+    assert.equal(created.data.balance, 0);
+    assert.equal(created.data.status, 'active');
+    assert.equal(created.data.firstName, 'Test');
+    assert.equal(created.data.accountNumber, 'CH5500235235889012345');
+    assert.equal(created.data.swiftCode, 'TESTBANK');
+    assert.equal((await request('/clients', recipient, 'POST', other)).status, 409);
+    assert.equal(await Client.countDocuments({ userId: other._id }), 2, 'Duplicate IBAN must never be replaced by a generated account');
+    for (const missing of ['lastName', 'bankName', 'accountNumber', 'swiftCode', 'bankAddress']) {
+      assert.equal((await request('/clients', { ...recipient, [missing]: '  ' }, 'POST', other)).status, 400);
+    }
+    assert.equal((await request('/clients/' + created.data._id, { lastName: 'Changed by another user' }, 'PUT')).status, 404);
+    const edited = await request('/clients/' + created.data._id, { lastName: 'Edited', userId: user.id, balance: 100, accountNumber: 'OTHER' }, 'PUT', other);
+    assert.equal(edited.status, 200);
+    assert.equal(edited.data.userId, other.id);
+    assert.equal(edited.data.balance, 0);
+    assert.equal(edited.data.accountNumber, created.data.accountNumber);
+
     const reserved = await transfer(50, { transferType: 'delayed', isScheduled: true });
     assert.equal(reserved.status, 201);
     assert.equal(reserved.balances.CHF, 25.25);
@@ -93,10 +115,10 @@ async function main() {
     const stored = await User.findById(user.id);
     assert.equal(stored.balances.CHF, (await balances(user)).CHF / 100);
     const uiUser = await User.create({ firstName: 'Mobile', lastName: 'Test', email: 'mobile@example.test', password: 'local-test-password' });
-    const uiClient = await makeClient(uiUser, 'Mobile beneficiary');
-    await require('../../frontend/scripts/verify-funds-ui.cjs').verifyFundsUi(base.replace(/\/api$/, ''), token(uiUser), uiClient.id);
+    const uiClientId = await require('../../frontend/scripts/verify-funds-ui.cjs').verifyFundsUi(base.replace(/\/api$/, ''), token(uiUser));
     assert.deepEqual(await balances(uiUser), { CHF: 7525, EUR: 2000, USD: 0 });
-    assert.equal((await Client.findById(uiClient.id)).balance, 25.25);
+    assert.equal((await Client.findById(uiClientId)).balance, 25.25);
+    assert.equal(await Client.countDocuments({ userId: uiUser._id }), 1);
     console.log('PASS: persisted deposits and transfers, currency isolation, insufficient funds, user isolation, pending reservations, concurrent transfers, rollback and repeat completion on a temporary MongoDB replica set.');
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));

@@ -60,86 +60,29 @@ router.get('/:id', async (req, res) => {
 // @access  Private
 router.post('/', async (req, res) => {
   try {
-    req.body.userId = req.user.id;
-    
-    // S'assurer que firstName est défini (vide si non fourni)
-    if (req.body.firstName === undefined || req.body.firstName === null) {
-      req.body.firstName = '';
+    const fields = ['firstName', 'lastName', 'bankName', 'accountNumber', 'swiftCode', 'bankAddress'];
+    const payload = Object.fromEntries(fields.map(field => [field, typeof req.body[field] === 'string' ? req.body[field].trim() : '']));
+    if (fields.filter(field => field !== 'firstName').some(field => !payload[field])) {
+      return res.status(400).json({ success: false, message: 'Complétez le nom et les coordonnées bancaires du bénéficiaire.' });
     }
-    
-    // Convertir le code SWIFT en majuscules
-    if (req.body.swiftCode) {
-      req.body.swiftCode = req.body.swiftCode.toUpperCase().trim();
+    payload.accountNumber = payload.accountNumber.replace(/\s+/g, '').toUpperCase();
+    payload.swiftCode = payload.swiftCode.replace(/\s+/g, '').toUpperCase();
+    if (!payload.accountNumber || !payload.swiftCode) {
+      return res.status(400).json({ success: false, message: 'Renseignez l’IBAN et le code SWIFT du bénéficiaire.' });
     }
-    
-    // Si un numéro de compte est fourni, vérifier qu'il est unique
-    if (req.body.accountNumber) {
-      const exists = await Client.findOne({ accountNumber: req.body.accountNumber });
-      if (exists) {
-        return res.status(400).json({
-          success: false,
-          message: 'Ce numéro de compte existe déjà'
-        });
-      }
-    } else {
-      // Generate unique account number if not provided
-      let accountNumber;
-      let isUnique = false;
-      let attempts = 0;
-      
-      while (!isUnique && attempts < 10) {
-        const timestamp = Date.now().toString().slice(-8);
-        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        accountNumber = `ACC${timestamp}${random}`;
-        
-        const exists = await Client.findOne({ accountNumber });
-        if (!exists) {
-          isUnique = true;
-        }
-        attempts++;
-      }
-      
-      if (!isUnique) {
-        // Fallback: use timestamp + userId + random
-        const timestamp = Date.now().toString();
-        const userId = req.user.id.toString().slice(-4);
-        const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-        accountNumber = `ACC${timestamp}${userId}${random}`.slice(0, 20);
-      }
-      
-      req.body.accountNumber = accountNumber;
-    }
-    
-    const client = await Client.create(req.body);
+    // Beneficiaries belong to the authenticated user; funds come from the ledger.
+    const client = await Client.create({ ...payload, userId: req.user.id, balance: 0, status: 'active' });
     res.status(201).json({
       success: true,
       data: client
     });
   } catch (error) {
-    // Handle duplicate account number error
     if (error.code === 11000 && error.keyPattern?.accountNumber) {
-      // Retry with a new account number
-      try {
-        const timestamp = Date.now().toString();
-        const userId = req.user.id.toString().slice(-4);
-        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        req.body.accountNumber = `ACC${timestamp}${userId}${random}`.slice(0, 20);
-        
-        const client = await Client.create(req.body);
-        return res.status(201).json({
-          success: true,
-          data: client
-        });
-      } catch (retryError) {
-        return res.status(500).json({
-          success: false,
-          message: 'Error creating client. Please try again.'
-        });
-      }
+      return res.status(409).json({ success: false, message: 'Ce numéro de compte est déjà enregistré. Vérifiez l’IBAN ou sélectionnez le bénéficiaire existant.' });
     }
-    res.status(500).json({
+    res.status(error.name === 'ValidationError' ? 400 : 500).json({
       success: false,
-      message: error.message
+      message: 'Impossible de créer le bénéficiaire. Vérifiez les informations et réessayez.'
     });
   }
 });
@@ -149,9 +92,11 @@ router.post('/', async (req, res) => {
 // @access  Private
 router.put('/:id', async (req, res) => {
   try {
-    let client = await Client.findOne({ 
-      _id: req.params.id
-    });
+    const updates = {};
+    for (const field of ['firstName', 'lastName', 'email', 'phone', 'address', 'bankName', 'swiftCode', 'bankAddress', 'status']) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) updates[field] = req.body[field];
+    }
+    const client = await Client.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, { $set: updates }, { new: true, runValidators: true });
 
     if (!client) {
       return res.status(404).json({
@@ -159,15 +104,6 @@ router.put('/:id', async (req, res) => {
         message: 'Client not found'
       });
     }
-
-    // Don't allow updating accountNumber or balance directly
-    delete req.body.accountNumber;
-    delete req.body.balance;
-
-    client = await Client.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
-    });
 
     res.json({
       success: true,
