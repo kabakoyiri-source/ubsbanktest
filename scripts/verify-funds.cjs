@@ -73,6 +73,8 @@ async function main() {
       assert.equal((await request('/clients', { ...recipient, [missing]: '  ' }, 'POST', other)).status, 400);
     }
     assert.equal((await request('/clients/' + created.data._id, { lastName: 'Changed by another user' }, 'PUT')).status, 404);
+    assert.equal((await request('/clients/' + created.data._id, undefined, 'DELETE')).status, 404);
+    assert.equal((await Client.findById(created.data._id)).deletedAt, null, 'Another account cannot remove a beneficiary');
     const edited = await request('/clients/' + created.data._id, { lastName: 'Edited', userId: user.id, balance: 100, accountNumber: 'OTHER' }, 'PUT', other);
     assert.equal(edited.status, 200);
     assert.equal(edited.data.userId, other.id);
@@ -114,12 +116,57 @@ async function main() {
     assert.equal((await Client.findById(client.id)).balance, before + 5);
     const stored = await User.findById(user.id);
     assert.equal(stored.balances.CHF, (await balances(user)).CHF / 100);
+
+    // Removing a used recipient must retain the ledger and existing reservations.
+    const waiting = await transfer(3, { transferType: 'delayed', isScheduled: true });
+    assert.equal(waiting.status, 201);
+    const beforeRemoval = await balances(user);
+    const recipientBalance = (await Client.findById(client.id)).balance;
+    const operationCount = await Operation.countDocuments({ userId: user._id });
+    assert.equal((await request('/clients/' + client.id, undefined, 'DELETE')).status, 200);
+    assert.equal((await request('/clients/' + client.id, undefined, 'DELETE')).status, 200, 'Repeated removal is harmless');
+    assert.equal((await request('/clients', undefined, 'GET')).data.length, 0);
+    assert.equal((await request('/clients/' + client.id, undefined, 'GET')).status, 404);
+    assert.equal((await request('/clients/' + client.id, { status: 'active', deletedAt: null }, 'PUT')).status, 404);
+    assert.equal((await transfer(1)).status, 404, 'Removed recipients cannot receive new transfers');
+    assert.equal((await request('/operations', { clientId: client.id, type: 'deposit', currency: 'CHF', amount: 1 })).status, 404);
+    assert.deepEqual(await balances(user), beforeRemoval, 'Removing a recipient must not change account balances');
+    assert.equal((await Client.findById(client.id)).balance, recipientBalance);
+    assert.equal(await Operation.countDocuments({ userId: user._id }), operationCount);
+    const history = await request('/operations/history/' + client.id, undefined, 'GET');
+    assert.equal(history.status, 200);
+    assert(history.data.every(operation => operation.clientId?._id === client.id && operation.clientId.lastName === client.lastName), 'History must retain the beneficiary identity');
+    assert.equal(history.data.find(operation => operation._id === waiting.data._id).status, 'pending');
+    assert.equal((await request('/operations/' + waiting.data._id + '/status', { status: 'completed' }, 'PUT')).status, 200);
+    assert.equal((await Client.findById(client.id)).balance, recipientBalance + 3, 'Previously scheduled transfers still work');
+    assert.equal((await request('/operations/' + waiting.data._id, undefined, 'DELETE')).status, 200, 'Reversing a past transfer still works after recipient removal');
+    assert.equal((await Client.findById(client.id)).balance, recipientBalance);
+    const restored = await request('/clients', { firstName: '', lastName: client.lastName, bankName: client.bankName, bankAddress: client.bankAddress, swiftCode: client.swiftCode, accountNumber: client.accountNumber, balance: 99999 });
+    assert.equal(restored.status, 201);
+    assert.equal(restored.data._id, client.id, 'Re-adding the same IBAN must preserve its history');
+    assert.equal(restored.data.balance, recipientBalance);
+    assert.equal(restored.data.deletedAt, null);
+    assert.equal((await request('/clients', undefined, 'GET')).data.length, 1);
+
+    // A removal racing with a transfer is serialized with the account ledger.
+    const racingClient = await makeClient(user, 'Concurrent removal');
+    const racing = await Promise.all([
+      transfer(1, { clientId: racingClient.id }),
+      request('/clients/' + racingClient.id, undefined, 'DELETE'),
+    ]);
+    assert.equal(racing[1].status, 200);
+    assert([201, 404].includes(racing[0].status));
+    assert((await Client.findById(racingClient.id)).deletedAt);
+    assert(!(await request('/clients', undefined, 'GET')).data.some(item => item._id === racingClient.id));
+    assert.equal((await Client.findById(racingClient.id)).balance, racing[0].status === 201 ? 1 : 0);
     const uiUser = await User.create({ firstName: 'Mobile', lastName: 'Test', email: 'mobile@example.test', password: 'local-test-password' });
     const uiClientId = await require('../../frontend/scripts/verify-funds-ui.cjs').verifyFundsUi(base.replace(/\/api$/, ''), token(uiUser));
     assert.deepEqual(await balances(uiUser), { CHF: 7525, EUR: 2000, USD: 0 });
     assert.equal((await Client.findById(uiClientId)).balance, 25.25);
+    assert((await Client.findById(uiClientId)).deletedAt, 'UI removal must persist in the database');
+    assert.equal((await request('/clients', undefined, 'GET', uiUser)).data.length, 0);
     assert.equal(await Client.countDocuments({ userId: uiUser._id }), 1);
-    console.log('PASS: persisted deposits and transfers, currency isolation, insufficient funds, user isolation, pending reservations, concurrent transfers, rollback and repeat completion on a temporary MongoDB replica set.');
+    console.log('PASS: persisted funds and transfers, isolation, reservations, concurrent mutations, rollback, beneficiary removal, preserved history, scheduled-transfer processing and re-adding the same IBAN on a temporary MongoDB replica set.');
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
     await mongoose.disconnect();

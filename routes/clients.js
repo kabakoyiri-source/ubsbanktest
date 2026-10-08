@@ -1,6 +1,7 @@
 const express = require('express');
 const Client = require('../models/Client');
 const { protect } = require('../middleware/auth');
+const { fail, withLedgerTransaction } = require('../services/ledger');
 
 const router = express.Router();
 
@@ -12,7 +13,7 @@ router.use(protect);
 // @access  Private
 router.get('/', async (req, res) => {
   try {
-    const clients = await Client.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    const clients = await Client.find({ userId: req.user.id, deletedAt: null }).sort({ createdAt: -1 });
     res.json({
       success: true,
       count: clients.length,
@@ -33,7 +34,8 @@ router.get('/:id', async (req, res) => {
   try {
     const client = await Client.findOne({ 
       _id: req.params.id, 
-      userId: req.user.id 
+      userId: req.user.id,
+      deletedAt: null
     });
 
     if (!client) {
@@ -71,7 +73,18 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Renseignez l’IBAN et le code SWIFT du bénéficiaire.' });
     }
     // Beneficiaries belong to the authenticated user; funds come from the ledger.
-    const client = await Client.create({ ...payload, userId: req.user.id, balance: 0, status: 'active' });
+    const { data: client } = await withLedgerTransaction(req.user.id, async ({ session }) => {
+      const previous = await Client.findOne({ userId: req.user.id, accountNumber: payload.accountNumber }).session(session);
+      if (previous) {
+        if (!previous.deletedAt) fail(409, 'Ce numéro de compte est déjà enregistré. Vérifiez l’IBAN ou sélectionnez le bénéficiaire existant.');
+        // Re-adding the same recipient retains its existing ledger and balance.
+        Object.assign(previous, payload, { deletedAt: null, status: 'active' });
+        await previous.save({ session });
+        return previous;
+      }
+      const [created] = await Client.create([{ ...payload, userId: req.user.id, balance: 0, status: 'active' }], { session });
+      return created;
+    });
     res.status(201).json({
       success: true,
       data: client
@@ -80,9 +93,9 @@ router.post('/', async (req, res) => {
     if (error.code === 11000 && error.keyPattern?.accountNumber) {
       return res.status(409).json({ success: false, message: 'Ce numéro de compte est déjà enregistré. Vérifiez l’IBAN ou sélectionnez le bénéficiaire existant.' });
     }
-    res.status(error.name === 'ValidationError' ? 400 : 500).json({
+    res.status(error.status || (error.name === 'ValidationError' ? 400 : 500)).json({
       success: false,
-      message: 'Impossible de créer le bénéficiaire. Vérifiez les informations et réessayez.'
+      message: error.status ? error.message : 'Impossible de créer le bénéficiaire. Vérifiez les informations et réessayez.'
     });
   }
 });
@@ -96,7 +109,7 @@ router.put('/:id', async (req, res) => {
     for (const field of ['firstName', 'lastName', 'email', 'phone', 'address', 'bankName', 'swiftCode', 'bankAddress', 'status']) {
       if (Object.prototype.hasOwnProperty.call(req.body, field)) updates[field] = req.body[field];
     }
-    const client = await Client.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, { $set: updates }, { new: true, runValidators: true });
+    const client = await Client.findOneAndUpdate({ _id: req.params.id, userId: req.user.id, deletedAt: null }, { $set: updates }, { new: true, runValidators: true });
 
     if (!client) {
       return res.status(404).json({
@@ -122,28 +135,24 @@ router.put('/:id', async (req, res) => {
 // @access  Private
 router.delete('/:id', async (req, res) => {
   try {
-    const client = await Client.findOne({ 
-      _id: req.params.id, 
-      userId: req.user.id 
+    await withLedgerTransaction(req.user.id, async ({ session }) => {
+      const client = await Client.findOne({ _id: req.params.id, userId: req.user.id }).session(session);
+      if (!client) fail(404, 'Bénéficiaire introuvable.');
+      if (!client.deletedAt) {
+        client.deletedAt = new Date();
+        await client.save({ session });
+      }
+      return null;
     });
-
-    if (!client) {
-      return res.status(404).json({
-        success: false,
-        message: 'Client not found'
-      });
-    }
-
-    await Client.findByIdAndDelete(req.params.id);
 
     res.json({
       success: true,
-      message: 'Client deleted successfully'
+      message: 'Bénéficiaire supprimé de votre liste.'
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || (error.name === 'CastError' ? 400 : 500)).json({
       success: false,
-      message: error.message
+      message: error.status ? error.message : 'Impossible de supprimer le bénéficiaire. Réessayez.'
     });
   }
 });

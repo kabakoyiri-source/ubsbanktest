@@ -65,6 +65,11 @@ const clientSchema = new mongoose.Schema({
     type: String,
     enum: ['active', 'inactive', 'suspended'],
     default: 'active'
+  },
+  // Keep referenced beneficiaries for ledger history after removal from the list.
+  deletedAt: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: true

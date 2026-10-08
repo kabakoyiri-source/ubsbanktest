@@ -19,9 +19,9 @@ const handle = action => async (req, res) => {
   }
 };
 const requireId = id => { if (!mongoose.isValidObjectId(id)) fail(400, 'Identifiant invalide.'); };
-async function ownedClient(clientId, userId, session) {
+async function ownedClient(clientId, userId, session, includeRemoved = false) {
   requireId(clientId);
-  const client = await Client.findOne({ _id: clientId, userId }).session(session);
+  const client = await Client.findOne({ _id: clientId, userId, ...(includeRemoved ? {} : { deletedAt: null }) }).session(session);
   if (!client) fail(404, 'Bénéficiaire non trouvé.');
   return client;
 }
@@ -63,7 +63,7 @@ router.get('/', handle(async (req, res) => {
 }));
 
 router.get('/history/:clientId', handle(async (req, res) => {
-  await ownedClient(req.params.clientId, req.user.id, null);
+  await ownedClient(req.params.clientId, req.user.id, null, true);
   const operations = await Operation.find({ clientId: req.params.clientId, userId: req.user.id }).populate('clientId', clientFields).sort({ createdAt: -1 });
   res.json({ success: true, count: operations.length, data: operations });
 }));
@@ -138,7 +138,7 @@ router.put('/:id/status', handle(async (req, res) => {
     if (operation.status === status) return operation.toObject();
     if (operation.status !== 'pending' || operation.type !== 'transfer') fail(400, 'Seul un virement en attente peut changer de statut.');
     if (status === 'completed') {
-      const client = await ownedClient(operation.clientId, req.user.id, session);
+      const client = await ownedClient(operation.clientId, req.user.id, session, true);
       await changeClientBalance(client, Math.abs(Math.round(operation.amount * 100)), session);
       operation.isScheduled = false;
     }
@@ -159,7 +159,7 @@ router.delete('/:id', handle(async (req, res) => {
       const currency = parseCurrency(operation.currency);
       if (cents > 0 && balances[currency] < cents) fail(409, 'Ces fonds ont déjà été utilisés et ne peuvent pas être supprimés.');
       if (operation.clientId) {
-        const client = await ownedClient(operation.clientId, req.user.id, session);
+        const client = await ownedClient(operation.clientId, req.user.id, session, true);
         await changeClientBalance(client, cents, session);
       }
     }
